@@ -1,0 +1,207 @@
+---
+title: "Spatial Aggregation of Imputed PM2.5 Values"
+output: html_document
+---
+
+```{r packages, include = FALSE}
+
+# List of required packages
+required_packages <- c("sf", "tidyverse", "parallel", "GenSA")
+
+# Function to check and install missing packages
+install_missing_packages <- function(packages) {
+  new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+  if(length(new_packages)) install.packages(new_packages, dependencies = TRUE)
+}
+
+# Install any missing packages
+install_missing_packages(required_packages)
+
+# Load the packages
+lapply(required_packages, require, character.only = TRUE)
+
+
+```
+
+```{r load data}
+pm <- read.csv("pm_per_station_imputed.csv")
+Mashhad_shape <- read_sf("mashhad_shape")
+district_data <- read.csv("district_data.csv")
+
+district_data <- district_data %>% mutate(date = as.Date(date))
+```
+
+```{r create grid}
+mashhad_shape <- st_read("Mashhad_shape")
+ 
+# create grid 100 x 100
+grid <- st_make_grid(mashhad_shape, cellsize = c(100, 100), what = "corners")
+grid_sf <- st_sf(geometry = st_sfc(grid))
+gridPoints <- st_cast(grid_sf, "POINT")
+points_with_district <- st_join(gridPoints, mashhad_shape)
+
+# extract coordinates
+grid_points <- points_with_district %>%
+  st_as_sf() %>% 
+  mutate(
+    Xcoor = st_coordinates(.)[,1],
+    Ycoor = st_coordinates(.)[,2]
+  ) %>%
+  as.data.frame() %>%
+  dplyr::select(Xcoor, Ycoor, District) %>%
+  rename(districtID = District) %>%
+  filter(!is.na(districtID)) # omit NA, i.e. outside of Mashhad borders
+
+# create date column
+dates <- seq(as.Date("2017-01-01"), as.Date("2020-12-31"), by="day")
+
+# extend grid to grid point - date combinations
+grid_points <- grid_points %>%
+  distinct() %>% 
+  crossing(date = dates)
+```
+
+
+# estimate the optimal decay-parameter for each point and date
+# Warning: very long run time 
+
+```{r}
+
+calculate_distances_once <- function(pm) {
+  station_coords <- unique(pm[, c("stationID", "Xcoor", "Ycoor")])
+  
+  n <- nrow(station_coords)
+  distances_matrix <- matrix(data = NA, nrow = n, ncol = n, dimnames = list(station_coords$stationID, station_coords$stationID))
+  
+  for (i in 1:n) {
+    for (j in 1:n) {
+      if (i != j) {
+        xi <- station_coords$Xcoor[i]
+        yi <- station_coords$Ycoor[i]
+        xj <- station_coords$Xcoor[j]
+        yj <- station_coords$Ycoor[j]
+        distances_matrix[i, j] <- sqrt((xi - xj)^2 + (yi - yj)^2)
+      }
+    }
+  }
+  
+  return(as.data.frame(distances_matrix))
+}
+
+# Target function
+objective_function <- function(decay_rate, station_id, data_for_date, 
+                               distances_matrix, removed_station) {
+  distances <- distances_matrix[station_id, names(distances_matrix) %in% data_for_date$stationID]
+  weights <- exp(-decay_rate * distances)
+  predicted_value <- sum(weights * data_for_date$PM2.5[match(names(distances), data_for_date$stationID)]) / sum(weights)
+  true_value <- removed_station$PM2.5
+  return(sum((true_value - predicted_value)^2))
+}
+
+# Parallelization
+parallel_process <- function(date, pm, distances_matrix) {
+  unique_stations <- unique(pm$stationID)
+  results <- list()
+  
+  data_on_date <- pm[pm$date == date, ]
+  
+  for (station_id in unique_stations) {
+    if (station_id %in% data_on_date$stationID) {
+      data_for_date <- data_on_date[data_on_date$stationID != station_id, ]
+      removed_station <- data_on_date[data_on_date$stationID == station_id, ]
+      
+      if (nrow(removed_station) > 0 && nrow(data_for_date) > 0) {
+        optim_result <- GenSA(lower = 0.0000001, upper = 1, 
+                              fn = objective_function, 
+                              station_id = station_id,
+                              data_for_date = data_for_date, 
+                              distances_matrix = distances_matrix,
+                              removed_station = removed_station, 
+                              control = list(seed = -1, max.time = 10))
+        
+        results[[as.character(station_id)]] <- 
+          list(date = date, stationID = station_id, 
+               estimated_decay_rate = optim_result$par,
+               optimum_value = optim_result$value)
+      }
+    }
+  }
+  
+  return(results)
+}
+
+distances_matrix <- calculate_distances_once(pm)
+cl <- makeCluster(detectCores() - 1)
+clusterExport(cl, 
+              varlist = c("objective_function", "distances_matrix", 
+                          "pm", "parallel_process"), 
+              envir = environment())
+clusterEvalQ(cl, {
+  library(dplyr)
+  library(GenSA)
+})
+
+unique_dates <- unique(pm$date)
+results_list <- parLapply(cl, unique_dates, 
+                          function(date) parallel_process(date, pm, distances_matrix))
+
+
+stopCluster(cl)
+
+estimated_decay_rates_df <- do.call(rbind, lapply(results_list, bind_rows))
+
+
+estimated_decay_rate <- median(estimated_decay_rates_df$estimated_decay_rate)
+# 0.0007413299
+
+```
+
+# Using estimated decay parameter to calculate PM2.5 values on district level
+# Warning: long run time 
+
+```{r PM2.5 district values}
+
+distance_euclidian <- function(x1, y1, x2, y2) {
+  sqrt((x2 - x1)^2 + (y2 - y1)^2)
+}
+
+# computation of weighted PM2.5 for one grid point on one date 
+calculate_exponential_weighted_pm25 <- 
+  function(grid_point, stations_on_date, decay_rate = estimated_decay_rate) {
+  distances <- sapply(1:nrow(stations_on_date), function(i) {
+    distance_euclidian(grid_point$Xcoor, grid_point$Ycoor, stations_on_date$Xcoor[i], stations_on_date$Ycoor[i])
+  })
+  distances <- ifelse(distances == 0, 1e-10, distances)
+  weights <- exp(-decay_rate * distances)
+  weighted_pm25 <- sum(weights * stations_on_date$PM2.5) / sum(weights)
+  return(weighted_pm25)
+}
+
+
+grid_points <- grid_points %>%
+  group_by(date) %>%
+  do({
+    grid_on_date <- .
+    stations_on_date <- pm %>% dplyr::filter(date == first(grid_on_date$date))
+    grid_on_date$PM2.5 <- sapply(1:nrow(grid_on_date), function(i) {
+      calculate_exponential_weighted_pm25(grid_on_date[i, ], stations_on_date)
+    })
+    grid_on_date
+  }) %>%
+  ungroup()
+
+# aggregate to district level
+temp <- grid_points %>% 
+  group_by(districtID, date) %>%
+  summarise(PM2.5 = mean(PM2.5)) %>%
+  ungroup()
+
+district_data <- left_join(district_data, temp)
+
+# save final district data with imputed and aggregated PM2.5
+write.csv(district_data, "district_data_final.csv", row.names = FALSE)
+
+
+```
+
+

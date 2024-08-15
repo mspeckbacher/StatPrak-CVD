@@ -1,0 +1,481 @@
+---
+title: "Extra Plots"
+output: html_document
+---
+
+```{r packages, include = FALSE}
+
+# List of required packages
+required_packages <- c("sf", "tidyverse")
+
+# Function to check and install missing packages
+install_missing_packages <- function(packages) {
+  new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+  if(length(new_packages)) install.packages(new_packages, dependencies = TRUE)
+}
+
+# Install any missing packages
+install_missing_packages(required_packages)
+
+# Load the packages
+lapply(required_packages, require, character.only = TRUE)
+
+```
+
+```{r load data}
+
+pm <- read.csv("pm_per_station_imputed.csv")
+Mashhad_shape <- read_sf("mashhad_shape")
+district_data <- read.csv("district_data_final.csv")
+
+dir.create("plots")
+
+```
+
+
+```{r manipulate data}
+Sys.setlocale("LC_ALL","English")
+
+district_data$DOW <- weekdays(as.Date(district_data$date))
+
+district_data <- district_data %>% mutate(
+  month = as.factor(month),
+  districtID = as.factor(districtID),
+  date = as.Date(date),
+  DOW = as.factor(DOW)
+)
+district_data <- district_data %>%
+  group_by(districtID) %>%
+  mutate(
+    PM2.5_lag1 = lag(PM2.5, 1),
+    PM2.5_lag2 = lag(PM2.5, 2),
+    PM2.5_lag3 = lag(PM2.5, 3),
+    PM2.5_lag4 = lag(PM2.5, 4),
+    PM2.5_lag5 = lag(PM2.5, 5),
+    PM2.5_cum1 = (PM2.5 + lag(PM2.5, 1)) / 2,
+    PM2.5_cum2 = (PM2.5 + lag(PM2.5, 1) + lag(PM2.5, 2)) / 3,
+    PM2.5_cum3 = (PM2.5 + lag(PM2.5, 1) + lag(PM2.5, 2) + lag(PM2.5, 3)) / 4,
+    PM2.5_cum4 = (PM2.5 + lag(PM2.5, 1) + lag(PM2.5, 2) + lag(PM2.5, 3) + lag(PM2.5, 4)) / 5,
+    PM2.5_cum5 = (PM2.5 + lag(PM2.5, 1) + lag(PM2.5, 2) + lag(PM2.5, 3) + lag(PM2.5, 4) + lag(PM2.5, 5)) / 6
+  ) %>%
+  ungroup()
+
+district_data$pop_above_age65 <- c(
+  ((district_data$population * district_data$percent_age65) / 100))
+district_data$pop_below_age65 <- district_data$population - district_data$pop_above_age65
+
+# without deletion of first 5 days due to lag computation
+district_data_noNA <- district_data 
+
+district_data <- district_data[complete.cases(district_data),]
+
+```
+
+
+
+# Map of Mashhad with AQM-Stations
+```{r}
+ggplot() +
+  geom_sf(data = Mashhad_shape, fill = "white", color = "black") +
+  geom_point(data = pm, aes(x = Xcoor, y = Ycoor), size = 6, color = "red") +  
+  geom_text(data = pm, aes(x = Xcoor, y = Ycoor, label = stationID), 
+            nudge_y = 600,  
+            size = 6, check_overlap = TRUE, hjust = "center", vjust = 0) +
+  labs( x = NULL, y = NULL)+
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 18),  
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 26)
+  )
+
+
+
+ggsave("plots/map_mashhad.png", width = 10, height = 10)
+
+```
+
+# Map of Mashhad
+```{r}
+
+ggplot() +
+  geom_sf(data = Mashhad_shape, fill = "white", color = "black") +
+  labs(title = "Map of Mashhad")+
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 18),  
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 26)
+  )
+
+ggsave("plots/map_mashhad_woAQM.png", width = 10, height = 10)
+```
+
+# Histogram CVD
+```{r}
+
+mean_cvd <- mean(district_data_noNA$CVD, na.rm = TRUE)
+
+ggplot(district_data_noNA, aes(x = CVD)) +
+  geom_histogram(fill = "grey", color = "black", binwidth = 1) +
+  geom_vline(xintercept = mean_cvd, color = "red", linetype = "dashed", size = 1) +
+  annotate("text", x = mean_cvd + 1.1, y = Inf, 
+           label = paste("Mean:", round(mean_cvd, 2)), 
+           vjust = 2, color = "red", size = 6) +
+  labs( 
+       x = "CVD Hospitalizations per District and Date", 
+       y = "Frequency") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 18), 
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 26)
+    )
+
+ggsave("plots/hist_cvd.png", width = 20, height = 10)
+
+```
+
+
+# Monthly aggregated time series of CVD
+```{r}
+district_data_co_sc <- district_data %>%
+  mutate(month_year = floor_date(date, "month")) %>%
+  group_by(month_year) %>%
+  summarise(CVD = sum(CVD))
+
+covid_periods <- district_data_noNA %>%
+  filter(covid == 1) %>%
+  summarise(start = min(date), end = max(date))
+
+screening_periods <- district_data_noNA %>%
+  filter(screening == 1) %>%
+  summarise(start = min(date), end = max(date))
+
+ggplot(district_data_co_sc, aes(x = month_year, y = CVD)) +
+  geom_rect(data = covid_periods, inherit.aes = FALSE,
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            fill = "blue", alpha = 0.2) +
+  annotate("text", label = "Covid", x = as.Date("2020-08-30"),
+           y = Inf, vjust = 2, color = "blue", size = 8) +
+  geom_rect(data = screening_periods, inherit.aes = FALSE,
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            fill = "red", alpha = 0.2) +
+  annotate("text", label = "Screening", x = as.Date("2019-09-15"),
+           y = Inf, vjust = 2, color = "red", size = 8) +
+  geom_line() +  
+  geom_point() +  
+  scale_x_date(date_breaks = "3 months", date_labels = "%b %Y") +
+  labs( x = "Time", y = "Number of CVD Hospitalizations") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 18),
+    axis.text = element_text(size = 18), 
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 26)
+  )+
+  ylim(0, NA)
+
+
+ggsave("plots/monthly_cvd.png", width = 20, height = 10)
+```
+
+# Mean PM2.5 across districts
+```{r}
+
+pm_mean_per_district <- district_data_noNA %>%
+  group_by(districtID) %>%
+  summarise(MeanPM25 = mean(PM2.5, na.rm = TRUE)) %>%
+  mutate(districtID = as.integer(districtID))
+
+Mashhad_shape_with_pm <- Mashhad_shape %>%
+  left_join(pm_mean_per_district, by = c('District' = 'districtID'))
+
+ggplot(Mashhad_shape_with_pm) +
+  geom_sf(aes(fill = MeanPM25), color = "black", size = 0.25) +
+  scale_fill_gradient(low = "grey90", high = "red", name = "Mean PM2.5",
+                      limits = c(23, 50), oob = scales::oob_squish)+  
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 18), 
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 20)
+    )
+
+ggsave("plots/map_mashhad_pm.png", width = 10, height = 10)
+
+
+```
+
+# Mean PM2.5 across stations
+```{r}
+
+pm_mean_per_station <- pm %>%
+  group_by(stationID, Xcoor, Ycoor) %>%
+  summarise(MeanPM25 = mean(PM2.5, na.rm = TRUE)) %>%
+  mutate(stationID = as.integer(stationID)) %>% ungroup()
+
+
+ggplot() +
+  geom_sf(data = Mashhad_shape, fill = "white", color = "black") +
+  geom_point(data = pm_mean_per_station, 
+             aes(x = Xcoor, y = Ycoor, fill = MeanPM25), size = 6, 
+             shape = 21, color = "black") +
+  scale_fill_gradient(low = "grey90", high = "red", name = "Mean PM2.5",
+                      limits = c(23, 50), oob = scales::oob_squish) +
+  labs(  x = NULL, y = NULL) +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 18), 
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 20)
+    )
+
+
+ggsave("plots/map_mashhad_pm_station.png", width = 10, height = 10)
+
+```
+
+# Schematic grid on Map
+```{r}
+
+bbox <- st_bbox(Mashhad_shape)
+x_seq <- seq(bbox["xmin"], bbox["xmax"], by = 2000)
+y_seq <- seq(bbox["ymin"], bbox["ymax"], by = 2000)
+grid_points <- expand.grid(X = x_seq, Y = y_seq)
+grid_sf <- st_as_sf(grid_points, coords = c("X", "Y"), 
+                    crs = st_crs(Mashhad_shape))
+
+ggplot() +
+  geom_sf(data = Mashhad_shape, fill = "white", color = "black") +
+  geom_sf(data = st_boundary(Mashhad_shape), color = "black", size = 0.5) +
+  geom_sf(data = grid_sf, aes(color = "Grid Points", shape = "Grid Points"), 
+          size = 3) +
+  geom_point(data = pm, aes(x = Xcoor, y = Ycoor, 
+                            color = "AQM-Stations", shape = "AQM-Stations"), 
+             size = 4) +
+  scale_color_manual(
+    values = c("Grid Points" = "black", "AQM-Stations" = "red"),
+    name = "Point Type",
+    labels = c("AQM-Stations" = "AQM-Stations", "Grid Points" = "Grid Points")  
+  ) +
+  scale_shape_manual(
+    values = c("Grid Points" = 16, "AQM-Stations" = 15), 
+    name = "Point Type",
+    labels = c("AQM-Stations" = "AQM-Stations", "Grid Points" = "Grid Points") 
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 18), 
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_blank(),
+    plot.title = element_text(size = 20),
+        legend.position = "bottom" 
+
+  ) +
+  labs(
+    x = NULL, y = NULL)
+
+ggsave("plots/map_grid.png", width = 10, height = 10)
+
+```
+
+# Histogram imputed and aggregated PM2.5 values
+```{r}
+
+ggplot(district_data_noNA, aes(x = PM2.5)) +
+  geom_histogram(binwidth = 5, fill = "grey", color = "black",
+                 breaks = seq(0, 300, by = 5)) +
+  geom_vline(aes(xintercept = 15), linetype = "dashed", color = "red", size = 1) +
+  annotate("text", x = 60, y = Inf, 
+           label = "WHO recommended maximum value (15 µg/m³)", 
+           vjust = 2, color = "red", size = 6) +
+  labs(
+     x = "PM2.5 Value",
+     y = "Frequency") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18), 
+    axis.text.y = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 20)
+  )
+
+ggsave("plots/hist_pm25_district.png", width = 20, height = 10)
+
+```
+
+
+# Barplot DistrictID - CVD
+```{r}
+
+CVD_district <- district_data_noNA %>%
+  group_by(districtID) %>%
+  summarise(Mean_CVD = mean(CVD, na.rm = TRUE))
+
+ggplot(CVD_district, aes(x = districtID, y = Mean_CVD)) +
+  geom_bar(stat = "identity", fill = "darkgrey") +
+  labs(x = "District ID", 
+       y = "Mean CVD Cases") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18), 
+    axis.text.y = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 20)
+  )+
+  ylim(NA, 6.5)
+
+ggsave("plots/CVD_district.png", width = 10, height = 10)
+
+
+```
+
+# Barplot DOW - CVD
+```{r}
+
+CVD_dow <- district_data_noNA %>%
+  mutate(DOW = factor(DOW, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))) %>%
+  group_by(DOW) %>%
+  summarise(Mean_CVD = mean(CVD, na.rm = TRUE))
+
+ggplot(CVD_dow, aes(x = DOW, y = Mean_CVD)) +
+  geom_bar(stat = "identity", fill = "darkgrey") +
+  labs(x = "Day of the Week", 
+       y = "Mean CVD Cases") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18), 
+    axis.text.y = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 20)
+  )+
+  ylim(NA, 6.5)
+
+ggsave("plots/CVD_dow.png", width = 10, height = 10)
+
+```
+
+
+# Barplot holiday - CVD
+
+```{r}
+CVD_holiday <- district_data_noNA %>%
+  mutate(holiday = factor(holiday)) %>%
+  group_by(holiday) %>%
+  summarise(Mean_CVD = mean(CVD, na.rm = TRUE))
+
+ggplot(CVD_holiday, aes(x = holiday, y = Mean_CVD)) +
+  geom_bar(stat = "identity", fill = "darkgrey") +
+  labs(x = "Holiday", 
+       y = "Mean CVD Cases") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18), 
+    axis.text.y = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 20)
+  )+
+  ylim(NA, 6.5)
+
+ggsave("plots/CVD_holiday.png", width = 10, height = 10)
+```
+
+# Barplot covid - CVD
+```{r}
+
+CVD_covid <- district_data_noNA %>%
+  mutate(covid = factor(covid)) %>%
+  group_by(covid) %>%
+  summarise(Mean_CVD = mean(CVD, na.rm = TRUE))
+
+ggplot(CVD_covid, aes(x = covid, y = Mean_CVD)) +
+  geom_bar(stat = "identity", fill = "darkgrey") +
+  labs(x = "COVID", 
+       y = "Mean CVD Cases") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18), 
+    axis.text.y = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 20)
+  )+
+  ylim(NA, 6.5)
+
+
+ggsave("plots/CVD_covid.png", width = 10, height = 10)
+
+```
+
+
+# Barplot Screening - CVD
+```{r}
+
+CVD_screening <- district_data_noNA %>%
+  mutate(screening = factor(screening)) %>%
+  group_by(screening) %>%
+  summarise(Mean_CVD = mean(CVD, na.rm = TRUE))
+
+ggplot(CVD_screening, aes(x = screening, y = Mean_CVD)) +
+  geom_bar(stat = "identity", fill = "darkgrey") +
+  labs(x = "Screening", 
+       y = "Mean CVD Cases") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18), 
+    axis.text.y = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 20)
+  )+
+  ylim(NA, 6.5)
+
+
+ggsave("plots/CVD_screening.png", width = 10, height = 10)
+
+```
+
+# Visualization Weight with distances for aggregation
+```{r}
+
+estimated_decay_rate <- 0.0007413299
+  
+distances <- seq(0, 10000, by = 10)  
+weights <- exp(-estimated_decay_rate * distances)
+
+data_for_plot <- data.frame(Distances = distances, Weights = weights)
+
+ggplot(data_for_plot, aes(x = Distances, y = Weights)) +
+  geom_line() + 
+  labs(
+       x = "Distance in Meter",
+       y = "Weight") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 18), 
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 26)
+    )
+
+ggsave("plots/weights_decay.png", width = 15, height = 10)
+
+```
+

@@ -1,0 +1,744 @@
+---
+title: "Modeling"
+output: html_document
+---
+
+# Warning: long run time 
+
+```{r packages, include = FALSE}
+
+# List of required packages
+required_packages <- c("tidyverse", "mgcv", "forecast", "gamlss", "xtable", "gridExtra", "sf")
+
+# Function to check and install missing packages
+install_missing_packages <- function(packages) {
+  new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+  if(length(new_packages)) install.packages(new_packages, dependencies = TRUE)
+}
+
+# Install any missing packages
+install_missing_packages(required_packages)
+
+# Load the packages
+lapply(required_packages, require, character.only = TRUE)
+
+dir.create("tables")
+dir.create("plots")
+
+set.seed(42)
+
+```
+
+# load and manipulate data
+```{r}
+
+Sys.setlocale("LC_ALL","English")
+
+
+district_data <- read.csv("district_data_final.csv")
+
+district_data$DOW <- weekdays(as.Date(district_data$date))
+
+district_data <- district_data %>% mutate(
+  month = as.factor(month),
+  districtID = as.factor(districtID),
+  date = as.Date(date),
+  DOW = as.factor(DOW)
+)
+district_data <- district_data %>%
+  group_by(districtID) %>%
+  mutate(
+    PM2.5_lag1 = lag(PM2.5, 1),
+    PM2.5_lag2 = lag(PM2.5, 2),
+    PM2.5_lag3 = lag(PM2.5, 3),
+    PM2.5_lag4 = lag(PM2.5, 4),
+    PM2.5_lag5 = lag(PM2.5, 5),
+    PM2.5_cum1 = (PM2.5 + lag(PM2.5, 1)) / 2,
+    PM2.5_cum2 = (PM2.5 + lag(PM2.5, 1) + lag(PM2.5, 2)) / 3,
+    PM2.5_cum3 = (PM2.5 + lag(PM2.5, 1) + lag(PM2.5, 2) + lag(PM2.5, 3)) / 4,
+    PM2.5_cum4 = (PM2.5 + lag(PM2.5, 1) + lag(PM2.5, 2) + lag(PM2.5, 3) + lag(PM2.5, 4)) / 5,
+    PM2.5_cum5 = (PM2.5 + lag(PM2.5, 1) + lag(PM2.5, 2) + lag(PM2.5, 3) + lag(PM2.5, 4) + lag(PM2.5, 5)) / 6
+  ) %>%
+  ungroup()
+
+district_data$pop_above_age65 <- c(
+  ((district_data$population * district_data$percent_age65) / 100))
+
+district_data$pop_below_age65 <- 
+  district_data$population - district_data$pop_above_age65
+
+district_data <- district_data[complete.cases(district_data),]
+
+```
+
+# formulas
+```{r}
+
+formulaCVD <- as.formula(
+  CVD ~ PM2.5 + districtID + DOW + ns(date, 20) + covid + screening + holiday +
+    offset(log(population))
+)
+
+shortformulaCVD <- '+ districtID + DOW + ns(date, 20) + covid + screening + holiday + offset(log(population))'
+
+shortformulaCVD_wodis <- ' + DOW + ns(date, 20) + covid + screening + holiday + offset(log(population))'
+
+shortformulaCVD_wodate <- '+ districtID + DOW + covid + screening + holiday + offset(log(population)) +'
+
+shortformulaCVD_group<- '+ districtID + DOW + ns(date, 20) + covid + screening + holiday + '
+
+shortformulaCVD_wodis2 <- '+ percent_illiterate + percent_unemployment + percent_age65+ area_km + DOW + ns(date, 20) + covid + screening + holiday +offset(log(population))'
+
+
+```
+
+
+# Fit quasipoisson model with PM2.5_lag0 for overdispersion
+```{r}
+model_qp <- gam(formulaCVD, data = district_data, family = "quasipoisson")
+
+summary(model_qp)
+
+```
+
+# Diagnostic plots for poisson model with PM2.5_lag0 and PM2.5_lag1
+```{r}
+
+lag0model <- gamlss(formulaCVD, data = district_data, family = PO)
+
+formulaCVDlag1 <- as.formula(
+  CVD ~ PM2.5_lag1 + districtID + DOW + ns(date, 20) + covid + screening + holiday +
+    offset(log(population))
+)
+
+
+png("plots/diaglag0.png", width = 10*600, height = 10*300, res = 300)
+
+par(cex.main = 2.5,
+    cex.lab = 2,
+    cex.axis = 2)
+plot(lag0model, 
+     parameters = par(mfrow = c(2, 2), 
+                      mar = par("mar") + c(0, 1, 0, 0), 
+                      bg = "white", col = "black"),
+     summaries = FALSE)
+
+dev.off()
+
+
+lag1model <-  gamlss(formulaCVDlag1, data = district_data, family = PO)
+
+
+png("plots/diaglag1.png", width = 10*600, height = 10*300, res = 300)
+
+par(cex.main = 2.5,
+    cex.lab = 2,
+    cex.axis = 2)
+plot(lag1model, 
+     parameters = par(mfrow = c(2, 2), 
+                      mar = par("mar") + c(0, 1, 0, 0), 
+                      bg = "white", col = "black"),
+     summaries = FALSE)
+
+dev.off()
+
+```
+
+# PACF Plots for PM2.5_lag0 
+```{r}
+
+district_data_residuals <- district_data
+district_data_residuals$residuals <- resid(lag0model, type = "simple")
+
+plot_and_save_pacf <- function(districtID, data) {
+  data_dis <- data[data$districtID == districtID,]
+  file_name <- sprintf("plots/pacf_district_lag0_%d.png", districtID)
+  
+  png(file_name, width = 1000, height = 1000, res = 300) 
+  Pacf(data_dis$residuals, plot = TRUE, main = paste("District", districtID), 
+       ylim = c(-0.15, 0.15))
+  dev.off()
+}
+
+for(i in 1:13) {
+  plot_and_save_pacf(i, district_data_residuals)
+}
+
+
+```
+
+
+# Main Models
+```{r}
+
+pm2.5_cols <- grep("PM2\\.5", names(district_data), value = TRUE)
+
+df_res <- data.frame(
+  variable = character(),
+  coefficient = numeric(),
+  std.error = numeric(),
+  p_value = numeric(),
+  AIC = numeric(),
+  stringsAsFactors = FALSE
+)
+
+
+for (i in seq_along(pm2.5_cols)) {
+  # Define the formula with the current PM2.5 term
+  formulaCVD <- as.formula(paste0("CVD ~ ", pm2.5_cols[i], shortformulaCVD))
+  
+  # Fit model
+  model_fit <- gamlss(formulaCVD, data = district_data, family = PO)
+  
+  model_summary <- summary(model_fit, save = T)
+  
+  df_res[i, "variable"] <- pm2.5_cols[i]
+  df_res[i, "coefficient"] <- model_summary$coef[pm2.5_cols[i]]
+  df_res[i, "std.error"] <- model_summary$se[pm2.5_cols[i]]
+  df_res[i, "p_value"] <- model_summary$pvalue[pm2.5_cols[i]]
+  df_res[i, "AIC"] <- model_fit$aic
+  
+}
+
+
+table_df_res <- tableGrob(df_res, rows = NULL)
+ggsave("tables/table_df_res.png", table_df_res)
+
+```
+
+# Visualization main results
+```{r}
+
+df_res$RR <- exp(df_res$coefficient)
+df_res$lower <- exp(df_res$coefficient - 1.96 * df_res$std.error)
+df_res$upper <- exp(df_res$coefficient + 1.96 * df_res$std.error)
+
+# Filter for single lag terms
+df_lags <- df_res
+df_lags[1, 1] <- "PM2.5_lag0"
+df_lags <- df_lags[grep("lag", df_lags$variable),]
+
+df_lags$lag_number <- as.numeric(gsub("PM2.5_lag", "", df_lags$variable))
+
+
+ggplot(df_lags, aes(x = lag_number, y = RR)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = .1, size = 1) +
+  xlab("Lag") +
+  ylab("Relative Risk") +
+  scale_x_continuous(breaks = df_lags$lag_number) +
+  geom_line(aes(y = 1), color = "red", lty = "dotted", size = 2 )  +
+  ylim(1 - 0.0018, 1 + 0.0018) +  
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18), 
+    axis.text.y = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 20)
+  )
+
+ggsave("plots/plot_lags.png", width = 10, height = 10)
+
+
+# Filter for cumulative lag terms
+df_cum <- df_res
+df_cum[1, 1] <- "PM2.5_cum0"
+df_cum <- df_cum[grep("cum", df_cum$variable),]
+
+df_cum$cum_number <- as.numeric(gsub("PM2.5_cum", "", df_cum$variable))
+
+
+ggplot(df_cum, aes(x = cum_number, y = RR)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = .1, size = 1) +
+  xlab("Cumulative Lag") +
+  ylab("Relative Risk") +
+  scale_x_continuous(breaks = df_cum$cum_number) +
+  geom_line(aes(y = 1), color = "red", lty = "dotted", size = 2) +
+  ylim(1 - 0.0018, 1 + 0.0018) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18), 
+    axis.text.y = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 20)
+  )
+
+ggsave("plots/plot_cum.png", width = 10, height = 10)
+
+```
+
+# Robustness
+## Robustness: different df for spline around date
+```{r}
+
+pm2.5_cols <- grep("PM2\\.5", names(district_data), value = TRUE)
+
+# different df for date spline
+df_timespline <- c(10, 15, 20, 25, 50)
+
+df_res_date <- data.frame(df = numeric(), 
+                         variable = character(), 
+                         coefficient = numeric(), 
+                         std.error = numeric(), 
+                         p_value = numeric(),
+                         AIC = numeric(),
+                         stringsAsFactors = FALSE)
+
+
+
+k <- 1 # for iterations
+
+for (j in seq_along(df_timespline)) {
+  for (i in seq_along(pm2.5_cols)) {
+
+    # Define model formula
+    formulaCVD <- as.formula(paste0("CVD ~ ", pm2.5_cols[i],
+                                    shortformulaCVD_wodate, "ns(date, ",
+                                    df_timespline[j], ")"))
+    
+    # Fit model
+    model_fit <- gamlss(formulaCVD, data = district_data, family = PO)
+    
+    model_summary <- summary(model_fit, save = T)
+    
+    df_res_date[k, "df"] <- df_timespline[j]
+    df_res_date[k, "variable"] <- pm2.5_cols[i]
+    df_res_date[k, "coefficient"] <- model_summary$coef[pm2.5_cols[i]]
+    df_res_date[k, "std.error"] <- model_summary$se[pm2.5_cols[i]]
+    df_res_date[k, "p_value"] <- model_summary$pvalue[pm2.5_cols[i]]
+    df_res_date[k, "AIC"] <- model_fit$aic
+
+     
+    k <- k + 1
+  }
+}
+
+
+```
+
+##  Tables for date spline
+```{r}
+df_res_date <- df_res_date %>%
+  mutate(variable = ifelse(variable == "PM2.5", "PM2.5_lag0", variable))
+
+colnames(df_res_date)[1] <- "df of date-spline"
+colnames(df_res_date)[3] <- "PM2.5 coefficient"
+
+
+# for report
+latex_date_cum <- df_res_date %>%
+  filter(variable %in% c("PM2.5_lag0", "PM2.5_cum1", "PM2.5_cum2", "PM2.5_cum3",
+                         "PM2.5_cum4", "PM2.5_cum5"))
+latex_date_lag <- df_res_date %>%
+  filter(variable %in% c("PM2.5_lag0", "PM2.5_lag1", "PM2.5_lag2", "PM2.5_lag3",
+                         "PM2.5_lag4", "PM2.5_lag5"))
+
+latex_date_lag$std.error <- NULL
+latex_date_cum$std.error <- NULL
+
+
+latex_date_lag <- xtable(latex_date_lag, digits = c(0, 0, 5, 5, 5, 1))
+latex_date_cum <- xtable(latex_date_cum, digits = c(0, 0, 5, 5, 5, 1))
+
+
+print.xtable(latex_date_lag, include.rownames = FALSE)
+print.xtable(latex_date_cum, include.rownames = FALSE)
+
+```
+
+
+## Robustness: Non-Linearity of PM2.5
+
+```{r}
+pm2.5_cols <- grep("PM2\\.5", names(district_data), value = TRUE)
+
+df_pmspline <- c(10)
+
+df_res_pm <- data.frame(df = numeric(), 
+                         variable = character(), 
+                         coefficient = numeric(), 
+                         std.error = numeric(), 
+                         p_value = numeric(),
+                         AIC = numeric(),
+                         stringsAsFactors = FALSE)
+
+
+k <- 1
+
+for (j in seq_along(df_pmspline)) {
+  for (i in seq_along(pm2.5_cols)) {
+
+    # Define model formula
+    formulaCVD <- 
+      as.formula(paste0("CVD ~ ", "s(", pm2.5_cols[i], ", bs = 'ps', k = ", df_pmspline[j], ")", shortformulaCVD))
+    
+    # Fit model
+    model_fit <- gam(formulaCVD, data = district_data, family = poisson)
+    
+    png(paste0("plots/spline_", pm2.5_cols[i], "_", "PM_spline", df_pmspline[j], ".png"), width = 480, height = 480)
+
+    plot(model_fit, 
+         ylim = c(-0.25, 0.25),
+         xlab = paste0( pm2.5_cols[i], " Value"), xlim = c(0,280))
+    
+    dev.off()
+
+    
+
+  }
+}
+```
+
+
+## Robustness: Capping
+```{r}
+
+# Capping PM2.5 values above 100 to 100
+district_data_cap <- district_data %>%
+  mutate(across(matches("^PM2\\.5"), ~ pmin(., 100)))
+
+pm2.5_cols <- grep("PM2\\.5", names(district_data_cap), value = TRUE)
+
+df_res_cap <- data.frame(
+  variable = character(),
+  coefficient = numeric(),
+  std.error = numeric(),
+  p_value = numeric(),
+  AIC = numeric(),
+  stringsAsFactors = FALSE
+)
+
+
+for (i in seq_along(pm2.5_cols)) {
+  
+  # Define formula with capped PM2.5 term
+  formulaCVD <- as.formula(paste0("CVD ~ ", pm2.5_cols[i], shortformulaCVD))
+  
+  # Fit model
+  model_fit <- gamlss(formulaCVD, data = district_data_cap, family = PO)
+  
+  model_summary <- summary(model_fit, save = T)
+  
+  df_res_cap[i, "variable"] <- pm2.5_cols[i]
+  df_res_cap[i, "coefficient"] <- model_summary$coef[pm2.5_cols[i]]
+  df_res_cap[i, "std.error"] <- model_summary$se[pm2.5_cols[i]]
+  df_res_cap[i, "p_value"] <- model_summary$pvalue[pm2.5_cols[i]]
+  df_res_cap[i, "AIC"] <- model_fit$aic
+  
+}
+
+table_df_res_cap <- tableGrob(df_res_cap, rows = NULL)
+ggsave("plots/table_df_res_cap.png", table_df_res_cap)
+
+```
+
+
+## Visualization Capping
+```{r}
+
+df_res_cap$RR <- exp(df_res_cap$coefficient)
+df_res_cap$lower <- exp(df_res_cap$coefficient - 1.96 * df_res_cap$std.error)
+df_res_cap$upper <- exp(df_res_cap$coefficient + 1.96 * df_res_cap$std.error)
+
+# Filter for single lag terms
+df_lags <- df_res_cap
+df_lags[1, 1] <- "PM2.5_lag0"
+df_lags <- df_lags[grep("lag", df_lags$variable),]
+
+df_lags$lag_number <- as.numeric(gsub("PM2.5_lag", "", df_lags$variable))
+
+
+ggplot(df_lags, aes(x = lag_number, y = RR)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = .1, size = 1) +
+  xlab("Lag") +
+  ylab("Relative Risk") +
+  scale_x_continuous(breaks = df_lags$lag_number) +
+  geom_line(aes(y = 1), color = "red", lty = "dotted", size = 2) +
+  ylim(1 - 0.0018, 1 + 0.0018) + 
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18), 
+    axis.text.y = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 20)
+  )
+
+ggsave("plots/plot_lags_CAP.png", width = 10, height = 10)
+
+
+# Filter for cumulative lag terms
+df_cum <- df_res_cap
+df_cum[1, 1] <- "PM2.5_cum0"
+df_cum <- df_cum[grep("cum", df_cum$variable),]
+
+df_cum$cum_number <- as.numeric(gsub("PM2.5_cum", "", df_cum$variable))
+
+ggplot(df_cum, aes(x = cum_number, y = RR)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = .1, size = 1) +
+  xlab("Cumulative Lag") +
+  ylab("Relative Risk") +
+  scale_x_continuous(breaks = df_cum$cum_number) +
+  geom_line(aes(y = 1), color = "red", lty = "dotted", size = 2) +
+  ylim(1 - 0.0018, 1 + 0.0018) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18), 
+    axis.text.y = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 20)
+  )
+
+ggsave("tables/plot_cum_CAP.png", width = 10, height = 10)
+
+
+```
+
+
+# Spatial Variation: one model per district
+```{r}
+
+pm2.5_cols <- grep("PM2\\.5", names(district_data), value = TRUE)
+
+districts <- unique(district_data$districtID)
+
+df_res_dis <- data.frame(district = character(), 
+                         variable = character(), 
+                         coefficient = numeric(), 
+                         std.error = numeric(), 
+                         p_value = numeric(),
+                         AIC = numeric(),
+                         stringsAsFactors = FALSE)
+
+
+k <- 1 # for iteration
+
+for (j in seq_along(districts)) {
+  for (i in seq_along(pm2.5_cols)) {
+    # Filter data for current district
+    district_data_j <- filter(district_data, districtID == districts[j])
+    
+    # Define the model formula with PM2.5 term
+    formulaCVD <- as.formula(paste0("CVD ~ ", pm2.5_cols[i], shortformulaCVD_wodis))
+    
+    # Fit model
+    model_fit <- gamlss(formulaCVD, data = district_data_j, family = PO)
+    
+    model_summary <- summary(model_fit, save = T)
+    
+    df_res_dis[k, "district"] <- districts[j]
+    df_res_dis[k, "variable"] <- pm2.5_cols[i]
+    df_res_dis[k, "coefficient"] <- model_summary$coef[pm2.5_cols[i]]
+    df_res_dis[k, "std.error"] <- model_summary$se[pm2.5_cols[i]]
+    df_res_dis[k, "p_value"] <- model_summary$pvalue[pm2.5_cols[i]]
+    df_res_dis[k, "AIC"] <- model_fit$aic
+    
+    k <- k + 1
+  }
+}
+
+
+# only single lag-terms for largest and smallest district
+table_df_res_dis <- df_res_dis %>%
+  filter(district %in% c(2, 13) & !grepl("cum", variable))
+
+table_df_res_dis <- tableGrob(table_df_res_dis, rows = NULL)
+ggsave("tables/table_df_res_dis.png", table_df_res_dis)
+
+
+```
+
+## Visualization Spatial Variation
+```{r}
+
+mashhad_shape <- st_read("mashhad_shape")
+
+# Define function to plot and save maps
+plot_and_save_maps <- function(df_res_dis, mashhad_shape) {
+  pm25_variables <- unique(df_res_dis$variable)
+
+  for(pm25_var in pm25_variables) {
+    df_filtered <- df_res_dis[df_res_dis$variable == pm25_var,]
+    df_filtered$coefficient_exp <- exp(df_filtered$coefficient)
+    merged_data <- merge(mashhad_shape, df_filtered, 
+                         by.x = "District", by.y = "district")
+    
+    if(pm25_var == pm25_variables[1]) {pm25_var <- "PM2.5_lag0"}
+    
+    plot <- ggplot() +
+      geom_sf(data = merged_data, aes(fill = coefficient_exp), color = "black") +
+      scale_fill_gradient2(low = "blue", high = "red", midpoint = 1, 
+                           limit = c(0.992, 1.008),
+                           name = "Relative Risk") +
+      geom_text(data = merged_data,
+                aes(x = x, y = y, label = District), size = 6, 
+                check_overlap = TRUE) +
+      xlab(NULL) +  
+      ylab(NULL) + 
+      theme_minimal()+
+      theme(
+              axis.text = element_text(size = 18), 
+              axis.title = element_text(size = 20),
+              legend.text = element_text(size = 18),
+              legend.title = element_text(size = 20),
+              plot.title = element_text(size = 20)
+    )
+    
+    
+    ggsave(paste0("plots/spatial_", pm25_var, ".png"), plot, width = 10, height = 10)
+    print(plot)
+  }
+}
+
+plot_and_save_maps(df_res_dis, mashhad_shape)
+
+
+```
+
+
+# Extra: Subgroup Analysis
+```{r}
+
+pm2.5_cols <- grep("PM2\\.5", names(district_data), value = TRUE)
+
+group <- c("above_age65", "below_age65") 
+
+df_res_group <- data.frame(group = character(), 
+                         variable = character(), 
+                         coefficient = numeric(), 
+                         std.error = numeric(), 
+                         p_value = numeric(),
+                         AIC = numeric(),
+                         stringsAsFactors = FALSE)
+
+k <- 1 # for iteration
+
+for (j in seq_along(group)) {
+  for (i in seq_along(pm2.5_cols)) {
+
+    # Define model formula
+    formulaCVD <- as.formula(paste0("CVD_", group[j], " ~ ", pm2.5_cols[i],
+                                    shortformulaCVD_group, 
+                                    "offset(log(pop_",group[j], "))"))
+    
+    # Fit model
+    model_fit <- gamlss(formulaCVD, data = district_data, family = PO)
+    
+    model_summary <- summary(model_fit, save = T)
+    
+    df_res_group[k, "group"] <- group[j]
+    df_res_group[k, "variable"] <- pm2.5_cols[i]
+    df_res_group[k, "coefficient"] <- model_summary$coef[pm2.5_cols[i]]
+    df_res_group[k, "std.error"] <- model_summary$se[pm2.5_cols[i]]
+    df_res_group[k, "p_value"] <- model_summary$pvalue[pm2.5_cols[i]]
+    df_res_group[k, "AIC"] <- model_fit$aic
+    
+    
+    
+    k <- k + 1
+  }
+}
+
+# save table for PM2.5 lag0 and PM2.5 lag1
+table_df_res_group <- df_res_group %>%
+  filter(variable %in% pm2.5_cols[c(1,2)])
+
+table_df_res_group <- tableGrob(table_df_res_group, rows = NULL)
+
+ggsave("tables/table_df_res_group.png", table_df_res_group)
+
+```
+
+
+## Visualization Subgroup Analysis
+```{r}
+
+df_res_group$RR <- exp(df_res_group$coefficient)
+df_res_group$lower <- exp(df_res_group$coefficient - 1.96 * df_res_group$std.error)
+df_res_group$upper <- exp(df_res_group$coefficient + 1.96 * df_res_group$std.error)
+
+# filter for single lag variables
+df_lags <- df_res_group
+df_lags[1, 1] <- "PM2.5_lag0"
+df_lags <- df_lags[grep("lag", df_lags$variable),]
+
+df_lags$lag_number <- as.numeric(gsub("PM2.5_lag", "", df_lags$variable))
+
+
+# Plot
+dodge_width = 0.25
+
+ggplot(df_lags, aes(x = lag_number, y = RR, group = group, color = group)) +
+  geom_point(position = position_dodge(width = dodge_width), size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = .05, size = 1,
+                position = position_dodge(width = dodge_width)) +
+  xlab("Lag") +
+  ylab("Relative Risk") +
+  scale_x_continuous(breaks = unique(df_cum$cum_number)) +
+  geom_hline(yintercept = 1, linetype = "dotted",color = "red", size = 2) +
+  ylim(1 - 0.0018, 1 + 0.0018) +  
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18), 
+    axis.text.y = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 20),
+    legend.position = "bottom"
+  )+
+    scale_color_manual(name = "Group", labels = c(">=65 years", "<65 years"), 
+                       values = c("darkgreen", "blue")) 
+
+ggsave("plots/plot_lags_GROUP.png", width = 10, height = 10)
+
+
+# Filter for cumulative lag terms
+df_cum <- df_res_group
+df_cum[1, 1] <- "PM2.5_cum0"
+df_cum <- df_cum[grep("cum", df_cum$variable),]
+
+df_cum$cum_number <- as.numeric(gsub("PM2.5_cum", "", df_cum$variable))
+
+# Plot
+
+ggplot(df_cum, aes(x = cum_number, y = RR, group = group, color = group)) +
+  geom_point(position = position_dodge(width = dodge_width), size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = .05, size = 1, 
+                position = position_dodge(width = dodge_width)) +
+  xlab("Cumulative Lag") +
+  ylab("Relative Risk") +
+  scale_x_continuous(breaks = unique(df_cum$cum_number)) +
+  geom_hline(yintercept = 1, color = "red", linetype = "dotted", size = 2) +
+  ylim(1 - 0.0018, 1 + 0.0018) +  
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18), 
+    axis.text.y = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20),
+    plot.title = element_text(size = 20),
+    legend.position = "bottom"
+  )+
+    scale_color_manual(name = "Group", labels = c(">=65 years", "<65 years"), 
+                       values = c("darkgreen", "blue")) 
+
+
+
+ggsave("plots/plot_cum_GROUP.png", width = 10, height = 10)
+
+
+```
+
+
